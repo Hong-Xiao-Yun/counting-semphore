@@ -5,35 +5,38 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include "thread.h"
+#include <fcntl.h>
+
 struct task {
     // pthread_t tid;
     int tid;
     struct  {
         int in;//pipefd[0] read
         int out;//pipefd[1] write
-    }pipe;
+    } pipe;
 };
 struct  semaphore {
     bool lock;
     int count;
-    struct task thrs[1024];//queue size
-    int t_idx;//tail
+    struct task thrs[1024];//max queue size
+    int t_idx;//waiting queue tail
     void (*p) (struct semaphore *s,int tid);
     void (*v) (struct semaphore *s);
 
 };
-typedef struct semaphore *sem;
+typedef struct semaphore *sem;//sem = semaphore *
 bool TestAndSet(bool *target);
 void acquire(sem s,int tid);
 void release(sem s);
-void Enqueue(sem s,int tid);
+void Sleep(int fid);
 void Dequeue(sem s);
 void Destroy(sem s);
 void *active(void *aegp);
 static int REASONABLE_THREAD_MAX=500;
 
 
-
+//initial semaphore
+// int a; a=10
 struct  semaphore global_sem= {
     .lock=false,
     .count=0,
@@ -41,15 +44,18 @@ struct  semaphore global_sem= {
     .v=release,
 };
 
-
-
 int countNo;
+pthread_mutex_t gLock;
 int main(int argc, char const *argv[])
 {
+    sem s=&global_sem;//pointer to variable
     int nhijos;
-   threads** threadS;
-   pthread_t *tid;
-  
+    threads** threadS;
+    pthread_t *tid;
+    pthread_mutex_init(&gLock,NULL);
+
+
+
     countNo=0;
     if (argc > 1) {
         nhijos = atoi(argv[1]);
@@ -59,24 +65,28 @@ int main(int argc, char const *argv[])
         }
         threadS=(threads**)malloc(sizeof(threads*)*nhijos);
         tid=(pthread_t*)malloc(sizeof(pthread_t)*nhijos);
-        
+
         for (int i = 0; i < nhijos; ++i) {
             threadS[i] = (threads *)malloc(sizeof (threads));
             if(threadS[i]!=NULL) {
                 threadS[i] ->no=0;
                 threadS[i] ->tid=i;
-            }else{
+            } else {
                 printf("threadS=NULL\n");
                 exit(1);
             }
+            pipe((int *)&(s->thrs[i].pipe));//initial pipe
+            fcntl(s->thrs[i].pipe.out, F_SETFL, O_NONBLOCK | O_WRONLY);//set pipe
+
         }
         for (int i = 0; i < nhijos; i++) {
             pthread_create(&tid[i], NULL, &active, threadS[i] );
         }
-         for (int i = 0; i < nhijos; i++) {
+        for (int i = 0; i < nhijos; i++) {
             pthread_join( tid[i], NULL );
         }
     }
+    pthread_mutex_destroy(&gLock);
 }
 void *active(void *aegp)
 {
@@ -84,12 +94,12 @@ void *active(void *aegp)
     threads *arg=(threads *)aegp;
     int no=arg->no;
     int tid=arg->tid;
+
     s->p(s,tid); //acquire
-    printf("%d\n",s->count );
+    printf("count ~~~~~%d\n",s->count );
     //critical section
     countNo++;
     no=countNo;
-    // printf("in \n");
     s->v(s); //release
     pthread_exit(0);
 }
@@ -97,78 +107,60 @@ void *active(void *aegp)
 bool TestAndSet(bool *target)
 {
     //mutex protect
+    pthread_mutex_lock(&gLock);
     bool rv = *target;
     *target =true;
-    return rv;
+    pthread_mutex_unlock(&gLock);
+    return rv;//return target value
 }
 void acquire(sem s,int tid)
 {
+    int fid;
+    int tmp;
     while(TestAndSet(&s->lock))
         ;
-    if (!s->count>2) { //if only allow 2 threads to get source
-        //put thread in the list
-        Enqueue(s,tid);
-        s->lock=false;
+
+    //Enqueue
+    s->thrs[s->t_idx].tid=tid;
+    tmp=s->t_idx;
+    printf("Enqueue%d\n",s->t_idx);
+    fid=s->thrs[s->t_idx].pipe.in;
+    s->t_idx++;
+    pthread_mutex_lock(&gLock);
+    s->lock=false;
+    pthread_mutex_unlock(&gLock);
+    if (s->count >= 3) { //if only allow 2 threads to get source
+        //put thread in the stack
+        Sleep(fid);//unlock before sleep,if don't do this and thread will sleep and nobody to unlock
     } else {
-        s->count--;
-        s->lock=false;
+        s->count++;
     }
 }
 void release(sem s)
 {
     while(TestAndSet(&s->lock))
         ;
+
     if(s->t_idx > 0) {   //if wait queue not empty
         Dequeue(s); //dequeue thread from wait queue
     } else {
-        s->count++;
+        s->count--;
     }
+    pthread_mutex_lock(&gLock);
     s->lock=false;
+    pthread_mutex_unlock(&gLock);
+
 }
-void Enqueue(sem s,int tid)
+void Sleep(int fid)
 {
     char signal_t='a';
-
-    s->thrs[s->t_idx].tid=tid;
-    pipe((int *)&(s->thrs[s->t_idx].pipe));
-
-    s->t_idx++;
-
     //block
-    read(s->thrs[s->t_idx].pipe.in,&signal_t,1);
-}
-void Destroy(sem s)
-{
-    if (s->thrs[s->t_idx].pipe.in) {
-        close(s->thrs[s->t_idx].pipe.in);
-        s->thrs[s->t_idx].pipe.in = 0;
-    }
-    if (s->thrs[s->t_idx].pipe.out) {
-        close(s->thrs[s->t_idx].pipe.out);
-        s->thrs[s->t_idx].pipe.out = 0;
-    }
+    read(fid,&signal_t,1);
 }
 void Dequeue(sem s)
 {
     char signal_t='a';
-
-    write(s->thrs[s->t_idx].pipe.out,&signal_t,1);
-    Destroy(s);
     s->t_idx--;
+    write(s->thrs[s->t_idx].pipe.out,&signal_t,1);
+    printf("Dequeue %d\n",s->t_idx );
 }
-
-//queue async
-//lock set to false and then other thread can go through from test and set
-/*read()  attempts  to  read up to count bytes from file descriptor fd into the
-     buffer starting at buf.
-
-     On files that support seeking, the read operation commences  at  the  current
-     file  offset, and the file offset is incremented by the number of bytes read.
-     If the current file offset is at or past the end of file, no bytes are  read,
-     and read() returns zero.*/
-/* pipe()  creates  a pipe, a unidirectional data channel that can be used
-       for interprocess communication.  The array pipefd is used to return two
-       file  descriptors  referring to the ends of the pipe.  pipefd[0] refers
-       to the read end of the pipe.  pipefd[1] refers to the write end of  the
-       pipe.   Data  written  to  the write end of the pipe is buffered by the
-       kernel until it is read from the read end of  the  pipe. */
