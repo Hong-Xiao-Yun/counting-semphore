@@ -21,13 +21,13 @@ struct  semaphore {
     struct task thrs[1024];//max queue size
     int t_idx;//waiting queue tail
     void (*p) (struct semaphore *s,int tid);
-    void (*v) (struct semaphore *s);
+    void (*v) (struct semaphore *s,int tid);
 
 };
 typedef struct semaphore *sem;//sem = semaphore *
 bool TestAndSet(bool *target);
 void acquire(sem s,int tid);
-void release(sem s);
+void release(sem s,int tid);
 void Sleep(int fid);
 void Dequeue(sem s);
 void Destroy(sem s);
@@ -100,7 +100,7 @@ void *active(void *aegp)
     //critical section
     countNo++;
     no=countNo;
-    s->v(s); //release
+    s->v(s,tid); //release
     pthread_exit(0);
 }
 //atomic: only one cpu(thread) can do TestAndSet
@@ -117,44 +117,53 @@ void acquire(sem s,int tid)
 {
     int fid;
     int tmp;
+    printf("b acquire %d\n",tid ); 
     while(TestAndSet(&s->lock))
         ;
+    printf("a acquire %d\n",tid );
 
-    //Enqueue
-    s->thrs[s->t_idx].tid=tid;
-    tmp=s->t_idx;
-    printf("Enqueue%d\n",s->t_idx);
-    fid=s->thrs[s->t_idx].pipe.in;
-    s->t_idx++;
-    pthread_mutex_lock(&gLock);
-    s->lock=false;
-    pthread_mutex_unlock(&gLock);
     if (s->count >= 3) { //if only allow 2 threads to get source
         //put thread in the stack
-        Sleep(fid);//unlock before sleep,if don't do this and thread will sleep and nobody to unlock
+        s->thrs[s->t_idx].tid=tid;
+    tmp=s->t_idx;
+    printf("Enqueue%d %d\n",s->t_idx,s->count);
+    fid=s->thrs[s->t_idx].pipe.in;
+    s->t_idx++;
+     pthread_mutex_lock(&gLock);
+    s->lock=false;
+     pthread_mutex_unlock(&gLock);
+        // Sleep(fid);//unlock before sleep,if don't do this and thread will sleep and nobody to unlock
+        Sleep(fid);
     } else {
         s->count++;
+         pthread_mutex_lock(&gLock);
+        s->lock=false;
+         pthread_mutex_unlock(&gLock);
+
     }
 }
-void release(sem s)
+void release(sem s,int tid)
 {
+    printf("b release %d\n",tid );
+
     while(TestAndSet(&s->lock))
         ;
+    printf("a release %d\n",tid );
 
     if(s->t_idx > 0) {   //if wait queue not empty
         Dequeue(s); //dequeue thread from wait queue
     } else {
         s->count--;
     }
-    pthread_mutex_lock(&gLock);
+     pthread_mutex_lock(&gLock);
     s->lock=false;
-    pthread_mutex_unlock(&gLock);
-
+     pthread_mutex_unlock(&gLock);
+   
 }
 void Sleep(int fid)
 {
     char signal_t='a';
-    //block
+    //block1);
     read(fid,&signal_t,1);
 }
 void Dequeue(sem s)
